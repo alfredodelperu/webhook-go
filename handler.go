@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
@@ -30,6 +31,10 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	record, err := extractRecord(body)
 	if err != nil {
+		if errors.Is(err, ErrIgnoredEvent) {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}

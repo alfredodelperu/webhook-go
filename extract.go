@@ -1,597 +1,289 @@
 package main
 
+// extract.go — reescrito para reflejar EXACTAMENTE el esquema real de
+// Evolution GO, confirmado contra la documentación oficial:
+// https://docs.evolutionfoundation.com.br/evolution-go/webhooks
+//
+// Cambios respecto a la versión anterior:
+//   1. Se reemplaza la búsqueda recursiva por clave genérica (findRecursive)
+//      por decodificación en structs tipados. Elimina el no-determinismo
+//      causado por el orden de iteración de mapas en Go y por colisiones
+//      de nombres de clave (ej. "id" apareciendo en más de un nivel).
+//   2. InstanceName ahora lee "instanceId" (el campo real), no "instance"/
+//      "instanceName" (que nunca existieron en el payload real — por eso
+//      antes siempre caía en "default").
+//   3. FromMe ahora lee "Info.IsFromMe" (el campo real), no "fromMe" a
+//      nivel raíz (que tampoco existe — por eso antes siempre era false).
+//   4. El tipo de mensaje ya NO se adivina inspeccionando las claves de
+//      "Message" (de ahí salía el "imageMessage" crudo en el CRM). Se lee
+//      directo de "Info.MediaType" / "Info.Type", que Evolution GO ya
+//      entrega limpio ("image", "video", "text", etc.).
+//   5. Solo se procesan eventos "Message". Cualquier otro evento (Receipt,
+//      Connected, QRCode, CallOffer, GroupInfo, ...) se ignora explícita-
+//      mente en vez de colarse como una fila vacía en la tabla de mensajes.
+//      IMPORTANTE: esto requiere un ajuste en handler.go — ver nota al
+//      final del archivo.
+//   6. IsGroup se lee directo de "Info.IsGroup" (Evolution GO ya lo
+//      resuelve), en vez de inferirlo del sufijo del JID.
+//   7. La deduplicación usa instanceName + Info.ID (identificador real y
+//      estable de WhatsApp), sin necesidad de un hash de todo el payload
+//      como respaldo.
+//
+// NOTA: los tipos MessageRecord, ContactRecord y ConversationRecord se
+// asumen definidos en messages.go tal como en la versión anterior. Si sus
+// campos difieren de lo que uso aquí, compártelos y ajusto el mapeo.
+
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
 
-type webhookEnvelope = map[string]any
+// ErrIgnoredEvent señala que el payload es válido pero no es un evento de
+// tipo "Message" (ej. Receipt, Connected, QRCode...). handler.go debe
+// tratar esto como "recibido, nada que guardar" y responder 2xx — NO como
+// un error 400, o Evolution GO reintentará 5 veces cada evento ignorado.
+var ErrIgnoredEvent = errors.New("evento ignorado: no es un mensaje de chat")
 
-func firstPathString(payload webhookEnvelope, paths ...[]string) string {
-	for _, path := range paths {
-		if v, ok := lookupPath(payload, path); ok {
-			if s, ok := stringValue(v); ok && strings.TrimSpace(s) != "" {
-				return s
-			}
-		}
-	}
-	return ""
+// ---------------------------------------------------------------------
+// Structs que reflejan el payload REAL de Evolution GO
+// ---------------------------------------------------------------------
+
+// evolutionEnvelope es la envoltura común a todos los eventos.
+type evolutionEnvelope struct {
+	Event         string          `json:"event"`
+	State         string          `json:"state"` // solo presente en "Receipt"
+	InstanceID    string          `json:"instanceId"`
+	InstanceToken string          `json:"instanceToken"`
+	Data          json.RawMessage `json:"data"`
 }
 
-func firstChatJID(payload webhookEnvelope) string {
-	return chooseFirstNonEmpty(
-		firstPathString(payload,
-			[]string{"data", "Info", "Chat"},
-			[]string{"data", "Message", "key", "remoteJID"},
-			[]string{"data", "Message", "key", "remoteJid"},
-			[]string{"message", "key", "remoteJID"},
-			[]string{"message", "key", "remoteJid"},
-			[]string{"remoteJid"},
-			[]string{"chatJid"},
-			[]string{"chat_jid"},
-			[]string{"jid"},
-		),
-		firstPathString(payload,
-			[]string{"data", "Info", "Chat"},
-		),
-	)
+// messageInfo refleja data.Info para eventos "Message".
+type messageInfo struct {
+	Chat      string `json:"Chat"`
+	Sender    string `json:"Sender"`
+	SenderAlt string `json:"SenderAlt"`
+	IsFromMe  bool   `json:"IsFromMe"`
+	IsGroup   bool   `json:"IsGroup"`
+	ID        string `json:"ID"`
+	Type      string `json:"Type"`      // "text" | "media"
+	PushName  string `json:"PushName"`
+	Timestamp string `json:"Timestamp"` // ISO 8601, ej. 2024-10-10T17:17:44-03:00
+	MediaType string `json:"MediaType"` // "image" | "video" | "audio" | "document" | ""
 }
 
-func firstSenderJID(payload webhookEnvelope) string {
-	return chooseFirstNonEmpty(
-		firstPathString(payload,
-			[]string{"data", "Info", "Sender"},
-			[]string{"data", "Message", "key", "participant"},
-			[]string{"data", "Message", "key", "participantJID"},
-			[]string{"message", "key", "participant"},
-			[]string{"message", "key", "participantJID"},
-			[]string{"participant"},
-			[]string{"senderJid"},
-			[]string{"sender"},
-			[]string{"from"},
-			[]string{"waId"},
-		),
-		firstPathString(payload,
-			[]string{"data", "Info", "Sender"},
-		),
-	)
+type messageData struct {
+	Info    messageInfo     `json:"Info"`
+	Message json.RawMessage `json:"Message"`
+	IsEdit  bool            `json:"IsEdit"`
 }
+
+// messageContent cubre las formas de "Message" que nos interesa mostrar
+// como texto/caption en el inbox. Se puede ampliar según se necesiten
+// más tipos (listResponseMessage, buttonsResponseMessage, etc.).
+type messageContent struct {
+	Conversation string `json:"conversation"`
+
+	ExtendedTextMessage *struct {
+		Text string `json:"text"`
+	} `json:"extendedTextMessage"`
+
+	ImageMessage *struct {
+		Caption string `json:"caption"`
+	} `json:"imageMessage"`
+
+	VideoMessage *struct {
+		Caption string `json:"caption"`
+	} `json:"videoMessage"`
+
+	DocumentMessage *struct {
+		Caption  string `json:"caption"`
+		FileName string `json:"fileName"`
+	} `json:"documentMessage"`
+
+	ReactionMessage *struct {
+		Text string `json:"text"`
+	} `json:"reactionMessage"`
+}
+
+// ---------------------------------------------------------------------
+// Extracción
+// ---------------------------------------------------------------------
 
 func extractRecord(raw []byte) (MessageRecord, error) {
 	cleanRaw, err := sanitizeWebhookPayload(raw)
 	if err != nil {
 		return MessageRecord{}, err
 	}
-	dec := json.NewDecoder(strings.NewReader(string(cleanRaw)))
-	dec.UseNumber()
-	var payload webhookEnvelope
-	if err := dec.Decode(&payload); err != nil {
+
+	var env evolutionEnvelope
+	if err := json.Unmarshal(cleanRaw, &env); err != nil {
 		return MessageRecord{}, fmt.Errorf("invalid json: %w", err)
 	}
 
-	record := MessageRecord{
-		RawPayload:  json.RawMessage(cleanRaw),
-		ReceivedAt:  time.Now().UTC(),
-		InstanceName: firstString(payload, "instance", "instanceName", "instance_name"),
-		EventType:    firstString(payload, "event", "eventType", "type"),
-		ProviderMessageID: firstString(payload,
-			"providerMessageId",
-			"messageId",
-			"id",
-			"stanzaId",
-		),
-		ChatJID:   firstChatJID(payload),
-		SenderJID: firstSenderJID(payload),
-		FromNumber: normalizePhoneFromJID(firstChatJID(payload)),
-		ToNumber:   normalizePhoneFromJID(firstSenderJID(payload)),
-		SenderName: firstString(payload,
-			"pushName",
-			"push_name",
-			"senderName",
-			"name",
-			"contactName",
-			"displayName",
-			"subject",
-		),
-		MessageType: firstMessageType(payload),
-		MessageText:  chooseFirstNonEmpty(firstMessageText(payload), firstMessageInteractiveText(payload), firstMessageCaption(payload)),
-		Caption:      firstMessageCaption(payload),
-		MessageStatus: firstString(payload,
-			"messageStatus",
-			"status",
-			"receiptStatus",
-		),
-		FromMe: firstBool(payload, "fromMe", "from_me"),
+	if strings.TrimSpace(env.Event) == "" {
+		return MessageRecord{}, errors.New("payload sin campo 'event'")
 	}
 
-	if record.EventType == "" {
-		// Evolution GO emits MESSAGE, but older wrappers may send messages.upsert.
-		record.EventType = firstString(payload, "event", "eventType", "type", "messageType")
-	}
-	if strings.TrimSpace(record.InstanceName) == "" {
-		record.InstanceName = "default"
+	instanceName := strings.TrimSpace(env.InstanceID)
+	if instanceName == "" {
+		instanceName = "default"
 	}
 
-	if record.ChatJID == "" {
-		record.ChatJID = firstString(payload, "remoteJid", "chatJid", "jid")
-	}
-	if record.SenderJID == "" {
-		record.SenderJID = record.ChatJID
-	}
-	if record.SenderName == "" {
-		record.SenderName = firstString(payload, "pushName", "name", "displayName")
-	}
-	if record.MessageText == "" {
-		record.MessageText = firstMessageText(payload)
-	}
-	if record.Caption == "" {
-		record.Caption = firstString(payload, "caption")
-	}
-	if record.MessageType == "" {
-		record.MessageType = messageTypeFromContent(payload)
-	}
-	if strings.TrimSpace(record.MessageType) == "" {
-		record.MessageType = "unknown"
+	// Solo el evento "Message" tiene la forma Info/Message que esperamos.
+	// Todo lo demás (Receipt, Connected, QRCode, CallOffer, GroupInfo,
+	// JoinedGroup, NewsletterJoin, ...) se ignora explícitamente.
+	if !strings.EqualFold(env.Event, "Message") {
+		return MessageRecord{}, fmt.Errorf("%w: event=%s", ErrIgnoredEvent, env.Event)
 	}
 
-	if ts := firstAny(payload, "messageTimestamp", "timestamp", "ts", "time"); ts != nil {
-		parsed, err := parseAnyTime(ts)
-		if err == nil {
-			record.MessageTimestamp = &parsed
-		}
+	var data messageData
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return MessageRecord{}, fmt.Errorf("data de mensaje inválida: %w", err)
+	}
+	if strings.TrimSpace(data.Info.ID) == "" {
+		return MessageRecord{}, errors.New("evento Message sin Info.ID")
 	}
 
-	if record.Direction == "" {
-		record.Direction = deriveDirection(record)
-	}
-	if record.Direction == "" {
-		record.Direction = "inbound"
+	var content messageContent
+	_ = json.Unmarshal(data.Message, &content) // best-effort: la forma varía por tipo
+
+	messageType, messageText, caption := classifyContent(data.Info, content)
+
+	direction := "inbound"
+	if data.Info.IsFromMe {
+		direction = "outbound"
 	}
 
-	if record.Direction == "outbound" {
-		record.ReceiverJID = chooseFirstNonEmpty(record.ChatJID, firstString(payload, "data", "Info", "Chat"))
-		if record.SenderJID == "" {
-			record.SenderJID = chooseFirstNonEmpty(firstString(payload, "data", "Info", "Sender"), firstString(payload, "data", "Message", "key", "participant"), firstString(payload, "senderJid"))
-		}
+	var senderJID, receiverJID string
+	if direction == "outbound" {
+		senderJID = data.Info.Sender
+		receiverJID = data.Info.Chat
 	} else {
-		record.SenderJID = chooseFirstNonEmpty(record.ChatJID, record.SenderJID)
-		if record.ReceiverJID == "" {
-			record.ReceiverJID = chooseFirstNonEmpty(firstString(payload, "data", "Info", "Receiver"), firstString(payload, "data", "Info", "Chat"), firstString(payload, "data", "Message", "key", "remoteJID"))
-		}
+		// En 1:1, Sender suele venir vacío o igual al contacto; en grupos,
+		// Sender es el participante real que escribió el mensaje.
+		senderJID = chooseFirstNonEmpty(data.Info.Sender, data.Info.Chat)
+		receiverJID = data.Info.Chat
 	}
 
-	if record.FromNumber == "" {
-		if record.Direction == "outbound" {
-			record.FromNumber = normalizePhoneFromJID(record.SenderJID)
-		} else {
-			record.FromNumber = normalizePhoneFromJID(record.SenderJID)
-		}
-	}
-	if record.ToNumber == "" {
-		if record.Direction == "outbound" {
-			record.ToNumber = normalizePhoneFromJID(record.ReceiverJID)
-		} else {
-			record.ToNumber = normalizePhoneFromJID(record.ReceiverJID)
-		}
+	var ts *time.Time
+	if parsed, err := time.Parse(time.RFC3339, data.Info.Timestamp); err == nil {
+		parsedUTC := parsed.UTC()
+		ts = &parsedUTC
 	}
 
-	peerJID := chooseFirstNonEmpty(record.ChatJID, firstString(payload, "data", "Info", "Chat"))
-	peerPhone := chooseFirstNonEmpty(normalizePhoneFromJID(peerJID), peerJID)
-	record.IsGroup = strings.HasSuffix(strings.ToLower(peerJID), "@g.us")
-	contactDisplayName := chooseFirstNonEmpty(record.SenderName, peerPhone)
-	conversationTitle := peerPhone
-	if record.Direction == "outbound" {
-		contactDisplayName = peerPhone
+	peerPhone := normalizePhoneFromJID(data.Info.Chat)
+	displayName := chooseFirstNonEmpty(data.Info.PushName, peerPhone)
+	if direction == "outbound" {
+		displayName = peerPhone
 	}
+
+	record := MessageRecord{
+		RawPayload:        json.RawMessage(cleanRaw),
+		ReceivedAt:        time.Now().UTC(),
+		InstanceName:      instanceName,
+		EventType:         env.Event,
+		ProviderMessageID: data.Info.ID,
+		ChatJID:           data.Info.Chat,
+		SenderJID:         senderJID,
+		ReceiverJID:       receiverJID,
+		FromNumber:        normalizePhoneFromJID(senderJID),
+		ToNumber:          normalizePhoneFromJID(receiverJID),
+		SenderName:        data.Info.PushName,
+		MessageType:       messageType,
+		MessageText:       messageText,
+		Caption:           caption,
+		FromMe:            data.Info.IsFromMe,
+		Direction:         direction,
+		IsGroup:           data.Info.IsGroup,
+		MessageTimestamp:  ts,
+	}
+
 	record.Contact = ContactRecord{
-		JID:         peerJID,
-		PhoneNumber: normalizePhoneFromJID(peerJID),
-		DisplayName: contactDisplayName,
-		PushName:    record.SenderName,
-		IsGroup:     record.IsGroup,
+		JID:         data.Info.Chat,
+		PhoneNumber: peerPhone,
+		DisplayName: displayName,
+		PushName:    data.Info.PushName,
+		IsGroup:     data.Info.IsGroup,
 		RawData:     json.RawMessage(`{}`),
 	}
 	record.Conversation = ConversationRecord{
-		ChatJID:    peerJID,
-		ContactJID: peerJID,
-		Title:      conversationTitle,
+		ChatJID:    data.Info.Chat,
+		ContactJID: data.Info.Chat,
+		Title:      peerPhone,
 		Status:     "open",
 		Metadata:   json.RawMessage(`{}`),
 	}
 
-	if record.EventFingerprint == "" {
-		record.EventFingerprint = fingerprintFromPayload(record, cleanRaw)
-	}
-
-	if record.EventType == "" && record.MessageText == "" && record.ProviderMessageID == "" {
-		return MessageRecord{}, errors.New("payload does not look like a WhatsApp message event")
-	}
+	// Clave de deduplicación: instancia + ID real del mensaje. Es única y
+	// estable entre reintentos — reemplaza al hash de payload completo que
+	// se usaba antes como respaldo.
+	record.EventFingerprint = fmt.Sprintf("%s:%s", instanceName, data.Info.ID)
 
 	return record, nil
 }
 
-func firstMessageType(payload webhookEnvelope) string {
-	if s := firstString(payload, "messageType", "message_type", "kind"); s != "" {
-		return s
-	}
-	if msg, ok := messageNode(payload); ok {
-		for _, key := range []string{
-			"conversation",
-			"extendedTextMessage",
-			"imageMessage",
-			"videoMessage",
-			"audioMessage",
-			"documentMessage",
-			"stickerMessage",
-			"templateMessage",
-			"buttonsResponseMessage",
-			"listResponseMessage",
-			"reactionMessage",
-			"protocolMessage",
-		} {
-			for k := range msg {
-				if strings.EqualFold(k, key) {
-					return key
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func messageTypeFromContent(payload webhookEnvelope) string {
-	if msg, ok := messageNode(payload); ok {
-		for key := range msg {
-			lower := strings.ToLower(key)
-			switch lower {
-			case "conversation", "extendedtextmessage", "imagemessage", "videomessage", "audiomessage", "documentmessage", "stickermessage", "templatemessage", "buttonsresponsemessage", "listresponsemessage", "reactionmessage", "protocolmessage":
-				return key
-			}
-		}
-	}
-	return ""
-}
-
-func firstMessageText(payload webhookEnvelope) string {
-	for _, path := range [][]string{
-		{"message", "conversation"},
-		{"data", "message", "conversation"},
-		{"message", "extendedTextMessage", "text"},
-		{"data", "message", "extendedTextMessage", "text"},
-		{"message", "imageMessage", "caption"},
-		{"data", "message", "imageMessage", "caption"},
-		{"message", "videoMessage", "caption"},
-		{"data", "message", "videoMessage", "caption"},
-		{"message", "documentMessage", "caption"},
-		{"data", "message", "documentMessage", "caption"},
-		{"message", "templateMessage", "hydratedTemplate", "hydratedContentText"},
-		{"data", "message", "templateMessage", "hydratedTemplate", "hydratedContentText"},
-		{"message", "buttonsResponseMessage", "selectedButtonId"},
-		{"data", "message", "buttonsResponseMessage", "selectedButtonId"},
-		{"message", "buttonsResponseMessage", "selectedDisplayText"},
-		{"data", "message", "buttonsResponseMessage", "selectedDisplayText"},
-		{"message", "listResponseMessage", "singleSelectReply", "selectedDisplayText"},
-		{"data", "message", "listResponseMessage", "singleSelectReply", "selectedDisplayText"},
-		{"message", "listResponseMessage", "singleSelectReply", "selectedRowId"},
-		{"data", "message", "listResponseMessage", "singleSelectReply", "selectedRowId"},
-		{"message", "listResponseMessage", "title"},
-		{"data", "message", "listResponseMessage", "title"},
-		{"message", "interactiveResponseMessage", "body", "text"},
-		{"data", "message", "interactiveResponseMessage", "body", "text"},
-		{"message", "interactiveResponseMessage", "nativeFlowResponseMessage", "paramsJson"},
-		{"data", "message", "interactiveResponseMessage", "nativeFlowResponseMessage", "paramsJson"},
-		{"message", "templateButtonReplyMessage", "selectedDisplayText"},
-		{"data", "message", "templateButtonReplyMessage", "selectedDisplayText"},
-		{"message", "templateButtonReplyMessage", "selectedId"},
-		{"data", "message", "templateButtonReplyMessage", "selectedId"},
-		{"message", "questionResponseMessage", "text"},
-		{"data", "message", "questionResponseMessage", "text"},
-		{"message", "protocolMessage", "editedMessage", "conversation"},
-		{"data", "message", "protocolMessage", "editedMessage", "conversation"},
-		{"message", "protocolMessage", "editedMessage", "extendedTextMessage", "text"},
-		{"data", "message", "protocolMessage", "editedMessage", "extendedTextMessage", "text"},
-		{"message", "protocolMessage", "editedMessage", "imageMessage", "caption"},
-		{"data", "message", "protocolMessage", "editedMessage", "imageMessage", "caption"},
-		{"message", "protocolMessage", "editedMessage", "videoMessage", "caption"},
-		{"data", "message", "protocolMessage", "editedMessage", "videoMessage", "caption"},
-		{"message", "protocolMessage", "editedMessage", "documentMessage", "caption"},
-		{"data", "message", "protocolMessage", "editedMessage", "documentMessage", "caption"},
-	} {
-		if v, ok := lookupPath(payload, path); ok {
-			if s, ok := v.(string); ok {
-				if strings.TrimSpace(s) != "" {
-					return s
-				}
-			}
-		}
-	}
-	return ""
-}
-
-func firstMessageCaption(payload webhookEnvelope) string {
-	for _, path := range [][]string{
-		{"message", "imageMessage", "caption"},
-		{"data", "message", "imageMessage", "caption"},
-		{"message", "videoMessage", "caption"},
-		{"data", "message", "videoMessage", "caption"},
-		{"message", "documentMessage", "caption"},
-		{"data", "message", "documentMessage", "caption"},
-	} {
-		if v, ok := lookupPath(payload, path); ok {
-			if s, ok := v.(string); ok {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-func firstMessageInteractiveText(payload webhookEnvelope) string {
-	for _, path := range [][]string{
-		{"message", "interactiveResponseMessage", "body", "text"},
-		{"data", "message", "interactiveResponseMessage", "body", "text"},
-		{"message", "interactiveResponseMessage", "nativeFlowResponseMessage", "paramsJson"},
-		{"data", "message", "interactiveResponseMessage", "nativeFlowResponseMessage", "paramsJson"},
-		{"message", "templateMessage", "hydratedTemplate", "hydratedContentText"},
-		{"data", "message", "templateMessage", "hydratedTemplate", "hydratedContentText"},
-		{"message", "buttonsResponseMessage", "selectedButtonId"},
-		{"data", "message", "buttonsResponseMessage", "selectedButtonId"},
-		{"message", "buttonsResponseMessage", "selectedDisplayText"},
-		{"data", "message", "buttonsResponseMessage", "selectedDisplayText"},
-		{"message", "listResponseMessage", "title"},
-		{"data", "message", "listResponseMessage", "title"},
-		{"message", "listResponseMessage", "singleSelectReply", "selectedRowId"},
-		{"data", "message", "listResponseMessage", "singleSelectReply", "selectedRowId"},
-		{"message", "listResponseMessage", "singleSelectReply", "selectedDisplayText"},
-		{"data", "message", "listResponseMessage", "singleSelectReply", "selectedDisplayText"},
-		{"message", "conversation"},
-		{"data", "message", "conversation"},
-	} {
-		if v, ok := lookupPath(payload, path); ok {
-			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-func deriveDirection(record MessageRecord) string {
-	if record.FromMe {
-		return "outbound"
-	}
-	if strings.EqualFold(record.EventType, "SEND_MESSAGE") {
-		return "outbound"
-	}
-	if record.ChatJID != "" && record.SenderJID != "" && !strings.EqualFold(record.ChatJID, record.SenderJID) {
-		lowerChat := strings.ToLower(record.ChatJID)
-		if !strings.HasSuffix(lowerChat, "@g.us") && lowerChat != "status@broadcast" {
-			return "outbound"
-		}
-	}
-	if strings.EqualFold(record.EventType, "MESSAGE") || strings.Contains(strings.ToLower(record.EventType), "message") {
-		return "inbound"
-	}
-	if record.ProviderMessageID == "" {
-		return "inbound"
-	}
-	return "inbound"
-}
-
-func firstString(v any, keys ...string) string {
-	for _, key := range keys {
-		if found, ok := findRecursive(v, key); ok {
-			if s, ok := stringValue(found); ok {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-func firstBool(v any, keys ...string) bool {
-	for _, key := range keys {
-		if found, ok := findRecursive(v, key); ok {
-			if b, ok := boolValue(found); ok {
-				return b
-			}
-		}
-	}
-	return false
-}
-
-func firstAny(v any, keys ...string) any {
-	for _, key := range keys {
-		if found, ok := findRecursive(v, key); ok {
-			return found
-		}
-	}
-	return nil
-}
-
-func messageNode(payload webhookEnvelope) (map[string]any, bool) {
-	for _, path := range [][]string{{"data", "message"}, {"message"}} {
-		if v, ok := lookupPath(payload, path); ok {
-			if m, ok := v.(map[string]any); ok {
-				return m, true
-			}
-		}
-	}
-	return nil, false
-}
-
-func chooseFirstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
-}
-
-func fingerprintFromPayload(record MessageRecord, raw []byte) string {
-	h := sha256.New()
-	_, _ = h.Write([]byte(strings.Join([]string{
-		record.InstanceName,
-		record.EventType,
-		record.ProviderMessageID,
-		record.ChatJID,
-		record.SenderJID,
-		record.MessageText,
-		record.MessageType,
-		record.Direction,
-	}, "|")))
-	_, _ = h.Write(raw)
-	return hex.EncodeToString(h.Sum(nil))
-}
-
-func hasKeyRecursive(v any, wanted string) bool {
-	_, ok := findRecursive(v, wanted)
-	return ok
-}
-
-func findRecursive(v any, wanted string) (any, bool) {
-	switch node := v.(type) {
-	case map[string]any:
-		for k, child := range node {
-			if strings.EqualFold(k, wanted) {
-				return child, true
-			}
-			if found, ok := findRecursive(child, wanted); ok {
-				return found, true
-			}
-		}
-	case []any:
-		for _, child := range node {
-			if found, ok := findRecursive(child, wanted); ok {
-				return found, true
-			}
-		}
-	}
-	return nil, false
-}
-
-func lookupPath(v any, path []string) (any, bool) {
-	if len(path) == 0 {
-		return v, true
-	}
-	switch node := v.(type) {
-	case map[string]any:
-		child, ok := node[path[0]]
-		if !ok {
-			for k, candidate := range node {
-				if strings.EqualFold(k, path[0]) {
-					return lookupPath(candidate, path[1:])
-				}
-			}
-			return nil, false
-		}
-		return lookupPath(child, path[1:])
-	case []any:
-		for _, child := range node {
-			if found, ok := lookupPath(child, path); ok {
-				return found, true
-			}
-		}
-	}
-	return nil, false
-}
-
-func stringValue(v any) (string, bool) {
-	switch x := v.(type) {
-	case string:
-		return x, true
-	case json.Number:
-		return x.String(), true
-	case float64:
-		if x == float64(int64(x)) {
-			return strconv.FormatInt(int64(x), 10), true
-		}
-		return strconv.FormatFloat(x, 'f', -1, 64), true
-	case bool:
-		return strconv.FormatBool(x), true
-	case nil:
-		return "", false
+// classifyContent decide el tipo de mensaje leyendo los campos que
+// Evolution GO YA entrega clasificados (Info.MediaType / Info.Type), en
+// vez de adivinar inspeccionando las claves de "Message".
+func classifyContent(info messageInfo, content messageContent) (messageType, text, caption string) {
+	switch {
+	case info.MediaType != "":
+		messageType = strings.ToLower(info.MediaType) // "image", "video", "audio", "document"
+	case info.Type != "":
+		messageType = strings.ToLower(info.Type) // "text" u otro tipo no mapeado a MediaType
 	default:
-		return fmt.Sprint(x), true
+		messageType = "unknown"
 	}
+
+	switch messageType {
+	case "text":
+		if content.Conversation != "" {
+			text = content.Conversation
+		} else if content.ExtendedTextMessage != nil {
+			text = content.ExtendedTextMessage.Text
+		} else if content.ReactionMessage != nil {
+			messageType = "reaction"
+			text = content.ReactionMessage.Text
+		}
+	case "image":
+		if content.ImageMessage != nil {
+			caption = content.ImageMessage.Caption
+		}
+	case "video":
+		if content.VideoMessage != nil {
+			caption = content.VideoMessage.Caption
+		}
+	case "document":
+		if content.DocumentMessage != nil {
+			caption = content.DocumentMessage.Caption
+		}
+	}
+
+	if text == "" {
+		text = caption
+	}
+	return messageType, text, caption
 }
 
-func boolValue(v any) (bool, bool) {
-	switch x := v.(type) {
-	case bool:
-		return x, true
-	case string:
-		switch strings.ToLower(strings.TrimSpace(x)) {
-		case "true", "1", "yes", "y", "on":
-			return true, true
-		case "false", "0", "no", "n", "off":
-			return false, true
-		}
-	case json.Number:
-		if i, err := x.Int64(); err == nil {
-			return i != 0, true
-		}
-	}
-	return false, false
-}
+// ---------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------
+//
+// NOTA: normalizePhoneFromJID y chooseFirstNonEmpty NO se redefinen aquí
+// a propósito — store.go ya las define en el mismo paquete `main`.
+// (El normalizePhoneFromJID de store.go no separa por ":", pero para los
+// JIDs reales de Evolution GO como "557499879409:38@s.whatsapp.net" eso
+// deja el sufijo ":38" pegado al número. Te lo señalo abajo como algo a
+// decidir, no lo cambio yo aquí para no duplicar definiciones.)
 
-func parseAnyTime(v any) (time.Time, error) {
-	switch x := v.(type) {
-	case string:
-		if x == "" {
-			return time.Time{}, errors.New("empty time string")
-		}
-		if t, err := time.Parse(time.RFC3339Nano, x); err == nil {
-			return t.UTC(), nil
-		}
-		if t, err := time.Parse(time.RFC3339, x); err == nil {
-			return t.UTC(), nil
-		}
-		if n, err := strconv.ParseInt(x, 10, 64); err == nil {
-			return unixToTime(n), nil
-		}
-		if f, err := strconv.ParseFloat(x, 64); err == nil {
-			return unixFloatToTime(f), nil
-		}
-		return time.Time{}, fmt.Errorf("unsupported time string: %q", x)
-	case json.Number:
-		if i, err := x.Int64(); err == nil {
-			return unixToTime(i), nil
-		}
-		if f, err := x.Float64(); err == nil {
-			return unixFloatToTime(f), nil
-		}
-		return time.Time{}, fmt.Errorf("unsupported number time: %v", x)
-	case float64:
-		return unixFloatToTime(x), nil
-	case int64:
-		return unixToTime(x), nil
-	case int:
-		return unixToTime(int64(x)), nil
-	default:
-		return time.Time{}, fmt.Errorf("unsupported time type %T", v)
-	}
-}
-
-func unixToTime(n int64) time.Time {
-	if n > 1_000_000_000_000 {
-		return time.UnixMilli(n).UTC()
-	}
-	return time.Unix(n, 0).UTC()
-}
-
+// sanitizeWebhookPayload redacta campos sensibles (tokens/API keys) antes
+// de guardar el payload crudo en la base de datos.
 func sanitizeWebhookPayload(raw []byte) ([]byte, error) {
 	var node any
-	dec := json.NewDecoder(strings.NewReader(string(raw)))
-	dec.UseNumber()
-	if err := dec.Decode(&node); err != nil {
+	if err := json.Unmarshal(raw, &node); err != nil {
 		return nil, fmt.Errorf("invalid json: %w", err)
 	}
 	redacted := redactSensitiveFields(node)
@@ -622,10 +314,24 @@ func redactSensitiveFields(v any) any {
 	}
 }
 
-func unixFloatToTime(n float64) time.Time {
-	if n > 1_000_000_000_000 {
-		ms := int64(n)
-		return time.UnixMilli(ms).UTC()
-	}
-	return time.Unix(int64(n), int64((n-float64(int64(n)))*1e9)).UTC()
-}
+// ---------------------------------------------------------------------
+// AJUSTE REQUERIDO EN handler.go
+// ---------------------------------------------------------------------
+//
+// Actualmente handler.go responde 400 ante cualquier error de
+// extractRecord. Con este cambio, los eventos no-"Message" (Receipt,
+// Connected, QRCode, etc.) devuelven ErrIgnoredEvent — que NO es un
+// fallo, es un "no aplica". Si sigues respondiendo 400, Evolution GO
+// reintentará esos eventos 5 veces innecesariamente.
+//
+// Cambio sugerido en ServeHTTP:
+//
+//   record, err := extractRecord(body)
+//   if err != nil {
+//       if errors.Is(err, ErrIgnoredEvent) {
+//           w.WriteHeader(http.StatusOK) // recibido, nada que guardar
+//           return
+//       }
+//       http.Error(w, "failed to parse payload", http.StatusBadRequest)
+//       return
+//   }

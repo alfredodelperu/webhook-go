@@ -707,7 +707,19 @@ func normalizePhoneFromJID(jid string) string {
 	if idx := strings.Index(jid, "@"); idx >= 0 {
 		jid = jid[:idx]
 	}
+	if idx := strings.Index(jid, ":"); idx >= 0 {
+		jid = jid[:idx]
+	}
 	return jid
+}
+
+func chooseFirstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func nullString(s string) any {

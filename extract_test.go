@@ -2,17 +2,29 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
-func TestExtractRecordParsesEvolutionLikePayload(t *testing.T) {
+func TestExtractRecordParsesInboundMessage(t *testing.T) {
 	raw := []byte(`{
-		"event":"messages.upsert",
+		"event":"Message",
+		"instanceId":"puno118",
 		"data":{
-			"key":{"id":"ABCD123","remoteJid":"51999999999@s.whatsapp.net"},
-			"pushName":"Felix Vilchez",
-			"message":{"conversation":"Hola, quiero precio"},
-			"messageTimestamp":1710000000
+			"Info":{
+				"Chat":"51999999999@s.whatsapp.net",
+				"Sender":"51999999999@s.whatsapp.net",
+				"IsFromMe":false,
+				"IsGroup":false,
+				"ID":"MSG-001",
+				"Type":"text",
+				"PushName":"Cliente A",
+				"Timestamp":"2024-10-10T17:17:44-03:00",
+				"MediaType":""
+			},
+			"Message":{
+				"conversation":"Hola, quiero precio de DTF UV."
+			}
 		}
 	}`)
 
@@ -21,69 +33,56 @@ func TestExtractRecordParsesEvolutionLikePayload(t *testing.T) {
 		t.Fatalf("extractRecord() error = %v", err)
 	}
 
-	if record.EventType != "messages.upsert" {
+	if record.InstanceName != "puno118" {
+		t.Fatalf("InstanceName = %q", record.InstanceName)
+	}
+	if record.EventType != "Message" {
 		t.Fatalf("EventType = %q", record.EventType)
 	}
-	if record.ProviderMessageID != "ABCD123" {
+	if record.ProviderMessageID != "MSG-001" {
 		t.Fatalf("ProviderMessageID = %q", record.ProviderMessageID)
 	}
-	if record.FromNumber != "51999999999" {
-		t.Fatalf("FromNumber = %q", record.FromNumber)
+	if record.Direction != "inbound" {
+		t.Fatalf("Direction = %q", record.Direction)
 	}
-	if record.SenderName != "Felix Vilchez" {
-		t.Fatalf("SenderName = %q", record.SenderName)
+	if record.MessageType != "text" {
+		t.Fatalf("MessageType = %q", record.MessageType)
 	}
-	if record.MessageText != "Hola, quiero precio" {
+	if record.MessageText != "Hola, quiero precio de DTF UV." {
 		t.Fatalf("MessageText = %q", record.MessageText)
 	}
-	if record.MessageType != "conversation" {
-		t.Fatalf("MessageType = %q", record.MessageType)
+	if record.Contact.DisplayName != "Cliente A" {
+		t.Fatalf("Contact.DisplayName = %q", record.Contact.DisplayName)
+	}
+	if record.EventFingerprint != "puno118:MSG-001" {
+		t.Fatalf("EventFingerprint = %q", record.EventFingerprint)
 	}
 	if record.MessageTimestamp == nil {
 		t.Fatal("MessageTimestamp = nil")
 	}
 }
 
-func TestExtractRecordParsesOutboundTextPayload(t *testing.T) {
-	raw := []byte(`{
-		"event":"messages.upsert",
-		"data":{
-			"key":{"id":"OUT123","remoteJid":"51988888888@s.whatsapp.net","fromMe":true},
-			"pushName":"DTF UV Perú",
-			"message":{"conversation":"Sí, lo tenemos listo"},
-			"messageTimestamp":1710000100
-		}
-	}`)
-
-	record, err := extractRecord(raw)
-	if err != nil {
-		t.Fatalf("extractRecord() error = %v", err)
-	}
-	if record.Direction != "outbound" {
-		t.Fatalf("Direction = %q", record.Direction)
-	}
-	if record.ReceiverJID != "51988888888@s.whatsapp.net" {
-		t.Fatalf("ReceiverJID = %q", record.ReceiverJID)
-	}
-	if record.ToNumber != "51988888888" {
-		t.Fatalf("ToNumber = %q", record.ToNumber)
-	}
-	if record.MessageText != "Sí, lo tenemos listo" {
-		t.Fatalf("MessageText = %q", record.MessageText)
-	}
-	if record.Conversation.Title != "51988888888" {
-		t.Fatalf("Conversation.Title = %q", record.Conversation.Title)
-	}
-}
-
-func TestExtractRecordInfersOutboundWhenSenderDiffersFromChat(t *testing.T) {
+func TestExtractRecordParsesOutboundImageCaption(t *testing.T) {
 	raw := []byte(`{
 		"event":"Message",
+		"instanceId":"puno118",
 		"data":{
-			"Info":{"Chat":"51971261549@s.whatsapp.net","Sender":"227994228547703@lid"},
-			"message":{"conversation":"Hola, revisa por favor"},
-			"pushName":"fc galeriapuno",
-			"messageTimestamp":1710000400
+			"Info":{
+				"Chat":"51988888888@s.whatsapp.net",
+				"Sender":"51910827777@s.whatsapp.net",
+				"IsFromMe":true,
+				"IsGroup":false,
+				"ID":"MSG-002",
+				"Type":"media",
+				"PushName":"DTF UV Perú",
+				"Timestamp":"2024-10-10T17:18:44-03:00",
+				"MediaType":"image"
+			},
+			"Message":{
+				"imageMessage":{
+					"caption":"Te envío la referencia"
+				}
+			}
 		}
 	}`)
 
@@ -91,88 +90,36 @@ func TestExtractRecordInfersOutboundWhenSenderDiffersFromChat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extractRecord() error = %v", err)
 	}
+
 	if record.Direction != "outbound" {
 		t.Fatalf("Direction = %q", record.Direction)
 	}
-	if record.ReceiverJID != "51971261549@s.whatsapp.net" {
-		t.Fatalf("ReceiverJID = %q", record.ReceiverJID)
+	if record.MessageType != "image" {
+		t.Fatalf("MessageType = %q", record.MessageType)
 	}
-	if record.Conversation.Title != "51971261549" {
-		t.Fatalf("Conversation.Title = %q", record.Conversation.Title)
+	if record.Caption != "Te envío la referencia" {
+		t.Fatalf("Caption = %q", record.Caption)
 	}
-	if record.Contact.DisplayName != "51971261549" {
+	if record.MessageText != "Te envío la referencia" {
+		t.Fatalf("MessageText = %q", record.MessageText)
+	}
+	if record.Contact.DisplayName != "51988888888" {
 		t.Fatalf("Contact.DisplayName = %q", record.Contact.DisplayName)
 	}
 }
 
-func TestExtractRecordParsesOutboundButtonsResponse(t *testing.T) {
+func TestExtractRecordIgnoresNonMessageEvents(t *testing.T) {
 	raw := []byte(`{
-		"event":"messages.upsert",
+		"event":"Receipt",
+		"instanceId":"puno118",
 		"data":{
-			"key":{"id":"OUT234","remoteJid":"51988888888@s.whatsapp.net","fromMe":true},
-			"pushName":"DTF UV Perú",
-			"message":{"buttonsResponseMessage":{"selectedDisplayText":"Confirmado"}},
-			"messageTimestamp":1710000200
+			"State":"delivered"
 		}
 	}`)
 
-	record, err := extractRecord(raw)
-	if err != nil {
-		t.Fatalf("extractRecord() error = %v", err)
-	}
-	if record.MessageText != "Confirmado" {
-		t.Fatalf("MessageText = %q", record.MessageText)
-	}
-}
-
-func TestExtractRecordParsesOutboundProtocolEditedMessage(t *testing.T) {
-	raw := []byte(`{
-		"event":"messages.upsert",
-		"data":{
-			"key":{"id":"OUT345","remoteJid":"51988888888@s.whatsapp.net","fromMe":true},
-			"pushName":"DTF UV Perú",
-			"message":{
-				"protocolMessage":{
-					"editedMessage":{
-						"conversation":"Sí, te lo confirmo"
-					}
-				}
-			},
-			"messageTimestamp":1710000300
-		}
-	}`)
-
-	record, err := extractRecord(raw)
-	if err != nil {
-		t.Fatalf("extractRecord() error = %v", err)
-	}
-	if record.MessageType != "protocolMessage" {
-		t.Fatalf("MessageType = %q", record.MessageType)
-	}
-	if record.MessageText != "Sí, te lo confirmo" {
-		t.Fatalf("MessageText = %q", record.MessageText)
-	}
-	if record.Direction != "outbound" {
-		t.Fatalf("Direction = %q", record.Direction)
-	}
-}
-
-func TestExtractRecordDefaultsUnknownMessageType(t *testing.T) {
-	raw := []byte(`{
-		"event":"Message",
-		"data":{
-			"key":{"id":"NO-TYPE","remoteJid":"51999999999@s.whatsapp.net"},
-			"pushName":"Cliente",
-			"messageTimestamp":1710000500
-		}
-	}`)
-
-	record, err := extractRecord(raw)
-	if err != nil {
-		t.Fatalf("extractRecord() error = %v", err)
-	}
-	if record.MessageType != "unknown" {
-		t.Fatalf("MessageType = %q", record.MessageType)
+	_, err := extractRecord(raw)
+	if !errors.Is(err, ErrIgnoredEvent) {
+		t.Fatalf("expected ErrIgnoredEvent, got %v", err)
 	}
 }
 
