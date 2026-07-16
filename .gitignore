@@ -1,0 +1,5 @@
+webhook-go
+*.exe
+*.test
+*.out
+.env
