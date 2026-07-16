@@ -1,0 +1,23 @@
+{
+  "event": "Message",
+  "instance": "puno118",
+  "data": {
+    "Info": {
+      "Chat": "51944444444@s.whatsapp.net",
+      "Sender": "51944444444@s.whatsapp.net",
+      "Receiver": "51910827777@s.whatsapp.net"
+    },
+    "pushName": "Cliente B",
+    "message": {
+      "listResponseMessage": {
+        "title": "Quiero cotizar textil",
+        "singleSelectReply": {
+          "selectedDisplayText": "Cotización textil",
+          "selectedRowId": "textil-01"
+        }
+      }
+    },
+    "messageTimestamp": 1710000500,
+    "messageStatus": "received"
+  }
+}

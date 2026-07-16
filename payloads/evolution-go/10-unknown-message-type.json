@@ -1,0 +1,13 @@
+{
+  "event": "Message",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "NO-TYPE",
+      "remoteJid": "51922222222@s.whatsapp.net"
+    },
+    "pushName": "Cliente C",
+    "messageTimestamp": 1710000900,
+    "messageStatus": "received"
+  }
+}

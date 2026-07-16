@@ -1,0 +1,20 @@
+{
+  "event": "messages.upsert",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "IMG001",
+      "remoteJid": "51977777777@s.whatsapp.net"
+    },
+    "pushName": "Cliente Imagen",
+    "message": {
+      "imageMessage": {
+        "caption": "Te envío el logo en PNG",
+        "mimetype": "image/png",
+        "fileLength": "248331"
+      }
+    },
+    "messageTimestamp": 1710000200,
+    "messageStatus": "received"
+  }
+}

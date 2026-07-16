@@ -1,0 +1,21 @@
+{
+  "event": "messages.upsert",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "INT001",
+      "remoteJid": "51933333333@s.whatsapp.net",
+      "fromMe": true
+    },
+    "pushName": "DTF UV Perú",
+    "message": {
+      "interactiveResponseMessage": {
+        "body": {
+          "text": "Acepto presupuesto"
+        }
+      }
+    },
+    "messageTimestamp": 1710000600,
+    "messageStatus": "sent"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "event": "Message",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "STAT001",
+      "remoteJid": "status@broadcast",
+      "fromMe": true
+    },
+    "pushName": "DTF UV Perú",
+    "message": {
+      "protocolMessage": {
+        "editedMessage": {
+          "conversation": "Estado actualizado."
+        }
+      }
+    },
+    "messageTimestamp": 1710000800,
+    "messageStatus": "sent"
+  }
+}

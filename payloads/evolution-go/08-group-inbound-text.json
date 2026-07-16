@@ -1,0 +1,17 @@
+{
+  "event": "Message",
+  "instance": "puno118",
+  "data": {
+    "Info": {
+      "Chat": "120363123456789012@g.us",
+      "Sender": "51922111000@s.whatsapp.net",
+      "Receiver": "51910827777@s.whatsapp.net"
+    },
+    "pushName": "Grupo Ventas",
+    "message": {
+      "conversation": "Recuerden enviar el arte final hoy."
+    },
+    "messageTimestamp": 1710000700,
+    "messageStatus": "received"
+  }
+}

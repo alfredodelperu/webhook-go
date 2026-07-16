@@ -1,0 +1,16 @@
+{
+  "event": "messages.upsert",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "ABCD123",
+      "remoteJid": "51999999999@s.whatsapp.net"
+    },
+    "pushName": "Cliente A",
+    "message": {
+      "conversation": "Hola, quiero precio de DTF UV."
+    },
+    "messageTimestamp": 1710000000,
+    "messageStatus": "received"
+  }
+}

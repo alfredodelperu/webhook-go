@@ -1,0 +1,20 @@
+{
+  "event": "messages.upsert",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "BTN234",
+      "remoteJid": "51966666666@s.whatsapp.net",
+      "fromMe": true
+    },
+    "pushName": "DTF UV Perú",
+    "message": {
+      "buttonsResponseMessage": {
+        "selectedButtonId": "confirmar",
+        "selectedDisplayText": "Confirmado"
+      }
+    },
+    "messageTimestamp": 1710000300,
+    "messageStatus": "sent"
+  }
+}

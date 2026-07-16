@@ -1,0 +1,21 @@
+{
+  "event": "messages.upsert",
+  "instance": "puno118",
+  "data": {
+    "key": {
+      "id": "OUT345",
+      "remoteJid": "51955555555@s.whatsapp.net",
+      "fromMe": true
+    },
+    "pushName": "DTF UV Perú",
+    "message": {
+      "protocolMessage": {
+        "editedMessage": {
+          "conversation": "Sí, te lo confirmo."
+        }
+      }
+    },
+    "messageTimestamp": 1710000400,
+    "messageStatus": "sent"
+  }
+}
