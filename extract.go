@@ -172,6 +172,12 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		return MessageRecord{}, errors.New("evento Message sin Info.ID")
 	}
 
+	// Filtrar actualizaciones de Estados de WhatsApp (status@broadcast)
+	// para que no saturen la bandeja del CRM ni creen conversaciones fantasma.
+	if strings.HasPrefix(data.Info.Chat, "status@") || strings.HasPrefix(data.Info.Sender, "status@") {
+		return MessageRecord{}, fmt.Errorf("%w: status broadcast", ErrIgnoredEvent)
+	}
+
 	var content messageContent
 	_ = json.Unmarshal(data.Message, &content) // best-effort: la forma varía por tipo
 
