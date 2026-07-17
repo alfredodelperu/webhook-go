@@ -137,6 +137,59 @@ type messageContent struct {
 // Extracción
 // ---------------------------------------------------------------------
 
+func extractLabelEvent(raw []byte) (LabelEvent, error) {
+	var env evolutionEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return LabelEvent{}, fmt.Errorf("invalid json: %w", err)
+	}
+
+	instanceName := strings.TrimSpace(env.InstanceID)
+	if instanceName == "" {
+		instanceName = "default"
+	}
+
+	if env.Event == "LabelEdit" {
+		var data struct {
+			LabelID string `json:"LabelID"`
+			Action  struct {
+				Name    string `json:"name"`
+				Color   int    `json:"color"`
+				Deleted bool   `json:"deleted"`
+			} `json:"Action"`
+		}
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return LabelEvent{}, err
+		}
+		return LabelEvent{
+			InstanceName: instanceName,
+			EventType:    env.Event,
+			LabelID:      data.LabelID,
+			Name:         data.Action.Name,
+			Color:        data.Action.Color,
+			Deleted:      data.Action.Deleted,
+		}, nil
+	} else if env.Event == "LabelAssociationChat" {
+		var data struct {
+			JID     string `json:"JID"`
+			LabelID string `json:"LabelID"`
+			Action  struct {
+				Labeled bool `json:"labeled"`
+			} `json:"Action"`
+		}
+		if err := json.Unmarshal(env.Data, &data); err != nil {
+			return LabelEvent{}, err
+		}
+		return LabelEvent{
+			InstanceName: instanceName,
+			EventType:    env.Event,
+			LabelID:      data.LabelID,
+			ChatJID:      data.JID,
+			Labeled:      data.Action.Labeled,
+		}, nil
+	}
+	return LabelEvent{}, fmt.Errorf("not a label event: %s", env.Event)
+}
+
 func extractRecord(raw []byte) (MessageRecord, error) {
 	cleanRaw, err := sanitizeWebhookPayload(raw)
 	if err != nil {

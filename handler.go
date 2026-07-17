@@ -32,12 +32,32 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Intercept label events
+	if strings.Contains(string(body), `"LabelEdit"`) || strings.Contains(string(body), `"LabelAssociationChat"`) {
+		labelEv, err := extractLabelEvent(body)
+		if err == nil {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			if err := h.Store.SaveLabelEvent(ctx, labelEv); err != nil {
+				if h.Logger != nil {
+					h.Logger.Printf("save label event: %v", err)
+				}
+				http.Error(w, "failed to store label event", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"status":  "accepted",
+				"message": "label stored",
+			})
+			return
+		}
+	}
+
 	record, err := extractRecord(body)
 	if err != nil {
 		if errors.Is(err, ErrIgnoredEvent) {
-			if h.Logger != nil && strings.Contains(strings.ToLower(string(body)), "label") {
-				h.Logger.Printf("DEBUG LABEL PAYLOAD: %s", string(body))
-			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}

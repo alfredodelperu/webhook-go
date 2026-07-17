@@ -56,9 +56,21 @@ type MessageRecord struct {
 	Conversation       ConversationRecord `json:"conversation"`
 }
 
+type LabelEvent struct {
+	InstanceName string
+	EventType    string // "LabelEdit" or "LabelAssociationChat"
+	LabelID      string
+	Name         string
+	Color        int
+	Deleted      bool
+	ChatJID      string
+	Labeled      bool
+}
+
 type Store interface {
 	EnsureSchema(context.Context) error
 	Save(context.Context, MessageRecord) error
+	SaveLabelEvent(context.Context, LabelEvent) error
 	ListRecent(context.Context, int) ([]MessageRecord, error)
 	MarkConversationRead(ctx context.Context, conversationID int64) error
 	Close() error
@@ -275,6 +287,96 @@ ALTER TABLE whatsapp_messages REPLICA IDENTITY FULL;
 `
 	_, err := s.db.ExecContext(ctx, ddl)
 	return err
+}
+
+func (s *PostgresStore) SaveLabelEvent(ctx context.Context, ev LabelEvent) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var instanceID int64
+	err = tx.QueryRowContext(ctx, "SELECT id FROM whatsapp_instances WHERE instance_name = $1", ev.InstanceName).Scan(&instanceID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Upsert instance minimally just to get ID
+			err = tx.QueryRowContext(ctx, "INSERT INTO whatsapp_instances (instance_name, metadata) VALUES ($1, '{}'::jsonb) ON CONFLICT (instance_name) DO UPDATE SET updated_at = NOW() RETURNING id", ev.InstanceName).Scan(&instanceID)
+			if err != nil {
+				return fmt.Errorf("failed to create instance for label: %w", err)
+			}
+		} else {
+			return err
+		}
+	}
+
+	if ev.EventType == "LabelEdit" {
+		if ev.Deleted {
+			_, err = tx.ExecContext(ctx, "DELETE FROM whatsapp_labels WHERE instance_id = $1 AND provider_label_id = $2", instanceID, ev.LabelID)
+		} else {
+			const q = `
+INSERT INTO whatsapp_labels (instance_id, name, color, metadata, created_at, updated_at, provider_label_id)
+VALUES ($1, $2, $3, '{}'::jsonb, NOW(), NOW(), $4)
+ON CONFLICT (instance_id, name) DO UPDATE SET
+    color = EXCLUDED.color,
+    provider_label_id = EXCLUDED.provider_label_id,
+    updated_at = NOW()
+`
+			_, err = tx.ExecContext(ctx, q, instanceID, ev.Name, ev.Color, ev.LabelID)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to upsert LabelEdit: %w", err)
+		}
+	} else if ev.EventType == "LabelAssociationChat" {
+		// Encontrar el conversation_id buscando el JID del chat en whatsapp_messages, porque el JID puede ser @lid
+		// y no sabemos a qué conversación pertenece directamente si whatsapp_conversations usa @s.whatsapp.net
+		var conversationID int64
+		err = tx.QueryRowContext(ctx, `
+			SELECT c.id
+			FROM whatsapp_conversations c
+			WHERE c.instance_id = $1 AND c.chat_jid = $2
+			LIMIT 1
+		`, instanceID, ev.ChatJID).Scan(&conversationID)
+
+		if err != nil && errors.Is(err, sql.ErrNoRows) {
+			// Intentar buscar en los raw_payloads de whatsapp_messages
+			err = tx.QueryRowContext(ctx, `
+				SELECT conversation_id
+				FROM whatsapp_messages
+				WHERE instance_id = $1 AND (
+					raw_payload->'data'->'Info'->>'SenderAlt' = $2 OR
+					raw_payload->'data'->'Info'->>'RecipientAlt' = $2 OR
+					raw_payload->'data'->'Info'->>'Chat' = $2 OR
+					raw_payload->'data'->'Info'->>'Sender' = $2
+				)
+				LIMIT 1
+			`, instanceID, ev.ChatJID).Scan(&conversationID)
+		}
+
+		if err == nil && conversationID > 0 {
+			var labelID int64
+			err = tx.QueryRowContext(ctx, "SELECT id FROM whatsapp_labels WHERE instance_id = $1 AND provider_label_id = $2", instanceID, ev.LabelID).Scan(&labelID)
+			if err == nil {
+				if ev.Labeled {
+					_, err = tx.ExecContext(ctx, `
+						INSERT INTO whatsapp_chat_labels (instance_id, conversation_id, label_id, created_at)
+						VALUES ($1, $2, $3, NOW())
+						ON CONFLICT (conversation_id, label_id) DO NOTHING
+					`, instanceID, conversationID, labelID)
+				} else {
+					_, err = tx.ExecContext(ctx, `
+						DELETE FROM whatsapp_chat_labels
+						WHERE instance_id = $1 AND conversation_id = $2 AND label_id = $3
+					`, instanceID, conversationID, labelID)
+				}
+				if err != nil {
+					return fmt.Errorf("failed to sync LabelAssociationChat: %w", err)
+				}
+			}
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (s *PostgresStore) Save(ctx context.Context, record MessageRecord) error {
