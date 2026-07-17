@@ -23,7 +23,9 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer r.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(r.Body, 2<<20))
+	// Evolution Go envía el base64 de los archivos multimedia en el webhook.
+	// Un video de 16MB puede pesar más de 20MB en base64, así que aumentamos el límite a 50MB.
+	body, err := io.ReadAll(io.LimitReader(r.Body, 50<<20))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
