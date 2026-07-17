@@ -123,6 +123,170 @@ func TestExtractRecordIgnoresNonMessageEvents(t *testing.T) {
 	}
 }
 
+func TestExtractRecordStickerMessage(t *testing.T) {
+	raw := []byte(`{
+		"event":"Message",
+		"instanceId":"puno118",
+		"data":{
+			"Info":{
+				"Chat":"51999999999@s.whatsapp.net",
+				"Sender":"51999999999@s.whatsapp.net",
+				"IsFromMe":false,
+				"IsGroup":false,
+				"ID":"MSG-STICKER-001",
+				"Type":"text",
+				"PushName":"Cliente B",
+				"Timestamp":"2024-10-10T17:20:00-03:00",
+				"MediaType":""
+			},
+			"Message":{
+				"stickerMessage":{
+					"url":"https://example.com/sticker.webp"
+				}
+			}
+		}
+	}`)
+
+	record, err := extractRecord(raw)
+	if err != nil {
+		t.Fatalf("extractRecord() error = %v", err)
+	}
+	if record.MessageType != "sticker" {
+		t.Fatalf("MessageType = %q, want sticker", record.MessageType)
+	}
+	if record.MessageText != "🏷️ Sticker" {
+		t.Fatalf("MessageText = %q, want sticker emoji text", record.MessageText)
+	}
+}
+
+func TestExtractRecordNewsletterDisplayName(t *testing.T) {
+	raw := []byte(`{
+		"event":"Message",
+		"instanceId":"puno118",
+		"data":{
+			"Info":{
+				"Chat":"120363408806567029@newsletter",
+				"Sender":"120363408806567029@newsletter",
+				"IsFromMe":false,
+				"IsGroup":false,
+				"ID":"MSG-NL-001",
+				"Type":"text",
+				"PushName":"",
+				"Timestamp":"2024-10-10T17:20:00-03:00",
+				"MediaType":""
+			},
+			"Message":{
+				"conversation":"Newsletter message"
+			}
+		}
+	}`)
+
+	record, err := extractRecord(raw)
+	if err != nil {
+		t.Fatalf("extractRecord() error = %v", err)
+	}
+	if record.Contact.DisplayName != "📢 Newsletter" {
+		t.Fatalf("Contact.DisplayName = %q, want newsletter label", record.Contact.DisplayName)
+	}
+	if record.Conversation.Title != "📢 Newsletter" {
+		t.Fatalf("Conversation.Title = %q, want newsletter label", record.Conversation.Title)
+	}
+}
+
+func TestNormalizeJID(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"557499879409:38@s.whatsapp.net", "557499879409@s.whatsapp.net"},
+		{"51999999999@s.whatsapp.net", "51999999999@s.whatsapp.net"},
+		{"120363408806567029@newsletter", "120363408806567029@newsletter"},
+		{"status@broadcast", "status@broadcast"},
+		{"120363423116317343@g.us", "120363423116317343@g.us"},
+		{"", ""},
+		{"plain-text", "plain-text"},
+		{"with:colon", "with"},
+	}
+	for _, tc := range tests {
+		got := normalizeJID(tc.input)
+		if got != tc.want {
+			t.Errorf("normalizeJID(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestExtractRecordGroupConversationTitle(t *testing.T) {
+	raw := []byte(`{
+		"event":"Message",
+		"instanceId":"puno118",
+		"data":{
+			"Info":{
+				"Chat":"120363423116317343@g.us",
+				"Sender":"51999999999@s.whatsapp.net",
+				"IsFromMe":false,
+				"IsGroup":true,
+				"ID":"MSG-GRP-001",
+				"Type":"text",
+				"PushName":"Miembro del grupo",
+				"Timestamp":"2024-10-10T17:20:00-03:00",
+				"MediaType":""
+			},
+			"Message":{
+				"conversation":"Hola a todos"
+			}
+		}
+	}`)
+
+	record, err := extractRecord(raw)
+	if err != nil {
+		t.Fatalf("extractRecord() error = %v", err)
+	}
+	// For groups, PushName is the participant, not the group name.
+	// Conversation title should use the PushName since group name is not available.
+	if record.Conversation.Title != "Miembro del grupo" {
+		t.Fatalf("Conversation.Title = %q", record.Conversation.Title)
+	}
+	if !record.IsGroup {
+		t.Fatal("IsGroup should be true")
+	}
+}
+
+func TestExtractRecordAudioPTT(t *testing.T) {
+	raw := []byte(`{
+		"event":"Message",
+		"instanceId":"puno118",
+		"data":{
+			"Info":{
+				"Chat":"51999999999@s.whatsapp.net",
+				"Sender":"51999999999@s.whatsapp.net",
+				"IsFromMe":false,
+				"IsGroup":false,
+				"ID":"MSG-AUDIO-001",
+				"Type":"media",
+				"PushName":"Cliente C",
+				"Timestamp":"2024-10-10T17:20:00-03:00",
+				"MediaType":"audio"
+			},
+			"Message":{
+				"audioMessage":{
+					"ptt":true
+				}
+			}
+		}
+	}`)
+
+	record, err := extractRecord(raw)
+	if err != nil {
+		t.Fatalf("extractRecord() error = %v", err)
+	}
+	if record.MessageType != "audio" {
+		t.Fatalf("MessageType = %q, want audio", record.MessageType)
+	}
+	if record.MessageText != "🎤 Mensaje de voz" {
+		t.Fatalf("MessageText = %q, want voice message text", record.MessageText)
+	}
+}
+
 type fakeStore struct {
 	saved []MessageRecord
 }
@@ -139,3 +303,4 @@ func (f *fakeStore) ListRecent(_ context.Context, _ int) ([]MessageRecord, error
 }
 
 func (f *fakeStore) Close() error { return nil }
+func (f *fakeStore) MarkConversationRead(_ context.Context, _ int64) error { return nil }

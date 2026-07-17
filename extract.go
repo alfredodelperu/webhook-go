@@ -98,10 +98,34 @@ type messageContent struct {
 		Caption string `json:"caption"`
 	} `json:"videoMessage"`
 
+	AudioMessage *struct {
+		PTT bool `json:"ptt"`
+	} `json:"audioMessage"`
+
 	DocumentMessage *struct {
 		Caption  string `json:"caption"`
 		FileName string `json:"fileName"`
 	} `json:"documentMessage"`
+
+	StickerMessage *struct {
+		URL string `json:"url"`
+	} `json:"stickerMessage"`
+
+	ContactMessage *struct {
+		DisplayName string `json:"displayName"`
+		VCard       string `json:"vcard"`
+	} `json:"contactMessage"`
+
+	LocationMessage *struct {
+		DegreesLatitude  float64 `json:"degreesLatitude"`
+		DegreesLongitude float64 `json:"degreesLongitude"`
+		Name             string  `json:"name"`
+		Address          string  `json:"address"`
+	} `json:"locationMessage"`
+
+	PollCreationMessage *struct {
+		Name string `json:"name"`
+	} `json:"pollCreationMessage"`
 
 	ReactionMessage *struct {
 		Text string `json:"text"`
@@ -174,11 +198,19 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		ts = &parsedUTC
 	}
 
-	peerPhone := normalizePhoneFromJID(data.Info.Chat)
-	displayName := chooseFirstNonEmpty(data.Info.PushName, peerPhone)
+	// Normalizar el chat JID para evitar duplicados por variantes (:38, etc.)
+	normalizedChat := normalizeJID(data.Info.Chat)
+	normalizedSender := normalizeJID(senderJID)
+	normalizedReceiver := normalizeJID(receiverJID)
+
+	peerPhone := normalizePhoneFromJID(normalizedChat)
+	displayName := resolveDisplayName(data.Info.PushName, peerPhone, normalizedChat, data.Info.IsGroup)
 	if direction == "outbound" {
 		displayName = peerPhone
 	}
+
+	// Título amigable para la conversación
+	conversationTitle := resolveConversationTitle(data.Info.PushName, peerPhone, normalizedChat, data.Info.IsGroup)
 
 	record := MessageRecord{
 		RawPayload:        json.RawMessage(cleanRaw),
@@ -186,11 +218,11 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		InstanceName:      instanceName,
 		EventType:         env.Event,
 		ProviderMessageID: data.Info.ID,
-		ChatJID:           data.Info.Chat,
-		SenderJID:         senderJID,
-		ReceiverJID:       receiverJID,
-		FromNumber:        normalizePhoneFromJID(senderJID),
-		ToNumber:          normalizePhoneFromJID(receiverJID),
+		ChatJID:           normalizedChat,
+		SenderJID:         normalizedSender,
+		ReceiverJID:       normalizedReceiver,
+		FromNumber:        normalizePhoneFromJID(normalizedSender),
+		ToNumber:          normalizePhoneFromJID(normalizedReceiver),
 		SenderName:        data.Info.PushName,
 		MessageType:       messageType,
 		MessageText:       messageText,
@@ -202,7 +234,7 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 	}
 
 	record.Contact = ContactRecord{
-		JID:         data.Info.Chat,
+		JID:         normalizedChat,
 		PhoneNumber: peerPhone,
 		DisplayName: displayName,
 		PushName:    data.Info.PushName,
@@ -210,9 +242,9 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		RawData:     json.RawMessage(`{}`),
 	}
 	record.Conversation = ConversationRecord{
-		ChatJID:    data.Info.Chat,
-		ContactJID: data.Info.Chat,
-		Title:      peerPhone,
+		ChatJID:    normalizedChat,
+		ContactJID: normalizedChat,
+		Title:      conversationTitle,
 		Status:     "open",
 		Metadata:   json.RawMessage(`{}`),
 	}
@@ -229,6 +261,7 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 // Evolution GO YA entrega clasificados (Info.MediaType / Info.Type), en
 // vez de adivinar inspeccionando las claves de "Message".
 func classifyContent(info messageInfo, content messageContent) (messageType, text, caption string) {
+	// 1. Determinar el tipo de mensaje a partir de Info.MediaType / Info.Type
 	switch {
 	case info.MediaType != "":
 		messageType = strings.ToLower(info.MediaType) // "image", "video", "audio", "document"
@@ -238,6 +271,20 @@ func classifyContent(info messageInfo, content messageContent) (messageType, tex
 		messageType = "unknown"
 	}
 
+	// 2. Refinar el tipo inspeccionando el contenido del mensaje cuando
+	//    Evolution GO no lo clasifica correctamente (ej. stickers llegan
+	//    como tipo "text" o "media" sin MediaType).
+	if content.StickerMessage != nil {
+		messageType = "sticker"
+	} else if content.ContactMessage != nil && messageType != "image" && messageType != "video" {
+		messageType = "contact"
+	} else if content.LocationMessage != nil {
+		messageType = "location"
+	} else if content.PollCreationMessage != nil {
+		messageType = "poll"
+	}
+
+	// 3. Extraer texto/caption según el tipo
 	switch messageType {
 	case "text":
 		if content.Conversation != "" {
@@ -256,9 +303,38 @@ func classifyContent(info messageInfo, content messageContent) (messageType, tex
 		if content.VideoMessage != nil {
 			caption = content.VideoMessage.Caption
 		}
+	case "audio":
+		if content.AudioMessage != nil && content.AudioMessage.PTT {
+			text = "🎤 Mensaje de voz"
+		} else {
+			text = "🎵 Audio"
+		}
 	case "document":
 		if content.DocumentMessage != nil {
 			caption = content.DocumentMessage.Caption
+			if caption == "" && content.DocumentMessage.FileName != "" {
+				text = "📎 " + content.DocumentMessage.FileName
+			}
+		}
+	case "sticker":
+		text = "🏷️ Sticker"
+	case "contact":
+		if content.ContactMessage != nil && content.ContactMessage.DisplayName != "" {
+			text = "👤 " + content.ContactMessage.DisplayName
+		} else {
+			text = "👤 Contacto"
+		}
+	case "location":
+		if content.LocationMessage != nil && content.LocationMessage.Name != "" {
+			text = "📍 " + content.LocationMessage.Name
+		} else {
+			text = "📍 Ubicación"
+		}
+	case "poll":
+		if content.PollCreationMessage != nil && content.PollCreationMessage.Name != "" {
+			text = "📊 " + content.PollCreationMessage.Name
+		} else {
+			text = "📊 Encuesta"
 		}
 	}
 
@@ -274,6 +350,125 @@ func classifyContent(info messageInfo, content messageContent) (messageType, tex
 //
 // NOTA: normalizePhoneFromJID y chooseFirstNonEmpty NO se redefinen aquí
 // a propósito — store.go ya las define en el mismo paquete `main`.
+// normalizeJID normaliza un JID de WhatsApp para uso como clave de
+// deduplicación. Quita el sufijo ":XX" que Evolution GO agrega al device
+// ID, dejando solo "numero@servidor".
+// Ej: "557499879409:38@s.whatsapp.net" → "557499879409@s.whatsapp.net"
+func normalizeJID(jid string) string {
+	if jid == "" {
+		return ""
+	}
+	jid = strings.TrimSpace(jid)
+
+	// Buscar el @ primero
+	atIdx := strings.Index(jid, "@")
+	if atIdx < 0 {
+		// Sin @, solo quitar el ":XX" si existe
+		if colonIdx := strings.Index(jid, ":"); colonIdx >= 0 {
+			return jid[:colonIdx]
+		}
+		return jid
+	}
+
+	// Tiene @: quitar ":XX" de la parte local (antes del @)
+	local := jid[:atIdx]
+	server := jid[atIdx:] // incluye el @
+	if colonIdx := strings.Index(local, ":"); colonIdx >= 0 {
+		local = local[:colonIdx]
+	}
+	return local + server
+}
+
+// jidSuffix devuelve la parte después del @ en un JID.
+// Ej: "51999@s.whatsapp.net" → "s.whatsapp.net"
+func jidSuffix(jid string) string {
+	if idx := strings.Index(jid, "@"); idx >= 0 {
+		return jid[idx+1:]
+	}
+	return ""
+}
+
+// isSpecialJID detecta JIDs que no representan un teléfono personal.
+func isSpecialJID(jid string) bool {
+	suffix := jidSuffix(jid)
+	switch suffix {
+	case "newsletter", "broadcast", "g.us", "s.whatsapp.net":
+		// s.whatsapp.net es personal, los demás son especiales
+		return suffix != "s.whatsapp.net"
+	}
+	// status@broadcast es especial
+	if strings.HasPrefix(jid, "status@") {
+		return true
+	}
+	return false
+}
+
+// resolveDisplayName genera un nombre legible para el contacto.
+// Para JIDs normales usa PushName o el teléfono.
+// Para newsletters/broadcasts/grupos usa nombres descriptivos.
+func resolveDisplayName(pushName, phone, jid string, isGroup bool) string {
+	if pushName != "" {
+		return pushName
+	}
+	suffix := jidSuffix(jid)
+	switch suffix {
+	case "newsletter":
+		return "📢 Newsletter"
+	case "broadcast":
+		if strings.HasPrefix(jid, "status@") {
+			return "📸 Estados"
+		}
+		return "📣 Difusión"
+	case "g.us":
+		if isGroup {
+			return "👥 Grupo"
+		}
+		return phone
+	}
+	if phone != "" {
+		return phone
+	}
+	return jid
+}
+
+// resolveConversationTitle genera un título para la conversación en el CRM.
+func resolveConversationTitle(pushName, phone, jid string, isGroup bool) string {
+	// Para chats 1:1 con push name, preferir push name como título
+	suffix := jidSuffix(jid)
+	switch suffix {
+	case "s.whatsapp.net":
+		if pushName != "" {
+			return pushName
+		}
+		return phone
+	case "newsletter":
+		if pushName != "" {
+			return pushName
+		}
+		return "📢 Newsletter"
+	case "broadcast":
+		if strings.HasPrefix(jid, "status@") {
+			return "📸 Estados"
+		}
+		return "📣 Difusión"
+	case "g.us":
+		if pushName != "" {
+			return pushName
+		}
+		if isGroup {
+			return "👥 Grupo"
+		}
+		return phone
+	}
+	if pushName != "" {
+		return pushName
+	}
+	if phone != "" {
+		return phone
+	}
+	return jid
+}
+
 // (El normalizePhoneFromJID de store.go no separa por ":", pero para los
 // JIDs reales de Evolution GO como "557499879409:38@s.whatsapp.net" eso
 // deja el sufijo ":38" pegado al número. Te lo señalo abajo como algo a

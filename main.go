@@ -35,10 +35,11 @@ func main() {
 	mux.HandleFunc("/health", healthHandler)
 	mux.Handle("/webhook", handler)
 	mux.Handle("/messages", &MessagesHandler{Store: store, Logger: logger})
+	mux.Handle("/conversations/read", &ConversationReadHandler{Store: store, Logger: logger})
 
 	srv := &http.Server{
 		Addr:              ":" + port,
-		Handler:           mux,
+		Handler:           CORSMiddleware(mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

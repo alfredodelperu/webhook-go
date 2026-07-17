@@ -53,3 +53,4 @@ func (f *fakeMessagesStore) ListRecent(_ context.Context, _ int) ([]MessageRecor
 	return append([]MessageRecord(nil), f.rows...), nil
 }
 func (f *fakeMessagesStore) Close() error { return nil }
+func (f *fakeMessagesStore) MarkConversationRead(_ context.Context, _ int64) error { return nil }

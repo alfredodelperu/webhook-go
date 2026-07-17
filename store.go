@@ -60,6 +60,7 @@ type Store interface {
 	EnsureSchema(context.Context) error
 	Save(context.Context, MessageRecord) error
 	ListRecent(context.Context, int) ([]MessageRecord, error)
+	MarkConversationRead(ctx context.Context, conversationID int64) error
 	Close() error
 }
 
@@ -678,6 +679,17 @@ SET unread_count = unread_count + 1,
 WHERE id = $1
 `
 	_, err := tx.ExecContext(ctx, q, conversationID)
+	return err
+}
+
+func (s *PostgresStore) MarkConversationRead(ctx context.Context, conversationID int64) error {
+	const q = `
+UPDATE whatsapp_conversations
+SET unread_count = 0,
+    updated_at = NOW()
+WHERE id = $1
+`
+	_, err := s.db.ExecContext(ctx, q, conversationID)
 	return err
 }
 
