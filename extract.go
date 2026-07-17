@@ -64,10 +64,11 @@ type evolutionEnvelope struct {
 type messageInfo struct {
 	Chat      string `json:"Chat"`
 	Sender    string `json:"Sender"`
-	SenderAlt string `json:"SenderAlt"`
-	IsFromMe  bool   `json:"IsFromMe"`
-	IsGroup   bool   `json:"IsGroup"`
-	ID        string `json:"ID"`
+	SenderAlt    string `json:"SenderAlt"`
+	RecipientAlt string `json:"RecipientAlt"`
+	IsFromMe     bool   `json:"IsFromMe"`
+	IsGroup      bool   `json:"IsGroup"`
+	ID           string `json:"ID"`
 	Type      string `json:"Type"`      // "text" | "media"
 	PushName  string `json:"PushName"`
 	Timestamp string `json:"Timestamp"` // ISO 8601, ej. 2024-10-10T17:17:44-03:00
@@ -181,15 +182,17 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		direction = "outbound"
 	}
 
-	var senderJID, receiverJID string
+	var senderJID, receiverJID, chatJID string
 	if direction == "outbound" {
 		senderJID = data.Info.Sender
-		receiverJID = data.Info.Chat
+		receiverJID = chooseFirstNonEmpty(data.Info.RecipientAlt, data.Info.Chat)
+		chatJID = receiverJID // Chat es el destinatario (el cliente)
 	} else {
 		// En 1:1, Sender suele venir vacío o igual al contacto; en grupos,
 		// Sender es el participante real que escribió el mensaje.
 		senderJID = chooseFirstNonEmpty(data.Info.Sender, data.Info.Chat)
 		receiverJID = data.Info.Chat
+		chatJID = data.Info.Chat // Chat es el remitente (el cliente) o el grupo
 	}
 
 	var ts *time.Time
@@ -199,7 +202,7 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 	}
 
 	// Normalizar el chat JID para evitar duplicados por variantes (:38, etc.)
-	normalizedChat := normalizeJID(data.Info.Chat)
+	normalizedChat := normalizeJID(chatJID)
 	normalizedSender := normalizeJID(senderJID)
 	normalizedReceiver := normalizeJID(receiverJID)
 
