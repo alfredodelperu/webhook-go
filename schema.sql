@@ -116,6 +116,8 @@ ALTER TABLE IF EXISTS whatsapp_messages ADD COLUMN IF NOT EXISTS created_at TIME
 ALTER TABLE IF EXISTS whatsapp_messages ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE IF EXISTS whatsapp_messages ALTER COLUMN received_at SET DEFAULT NOW();
 
+ALTER TABLE IF EXISTS whatsapp_labels ADD COLUMN IF NOT EXISTS provider_label_id TEXT;
+
 CREATE UNIQUE INDEX IF NOT EXISTS whatsapp_messages_event_fingerprint_uidx ON whatsapp_messages (event_fingerprint);
 
 CREATE INDEX IF NOT EXISTS whatsapp_events_received_at_idx ON whatsapp_events (received_at DESC);
