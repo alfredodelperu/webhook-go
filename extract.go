@@ -207,13 +207,21 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 	normalizedReceiver := normalizeJID(receiverJID)
 
 	peerPhone := normalizePhoneFromJID(normalizedChat)
-	displayName := resolveDisplayName(data.Info.PushName, peerPhone, normalizedChat, data.Info.IsGroup)
+	
+	// Si el mensaje es de salida, el PushName pertenece a la empresa, no al cliente.
+	// Lo vaciamos para evitar que la base de datos sobrescriba el nombre del cliente.
+	effectivePushName := data.Info.PushName
+	if direction == "outbound" {
+		effectivePushName = ""
+	}
+
+	displayName := resolveDisplayName(effectivePushName, peerPhone, normalizedChat, data.Info.IsGroup)
 	if direction == "outbound" {
 		displayName = peerPhone
 	}
 
 	// Título amigable para la conversación
-	conversationTitle := resolveConversationTitle(data.Info.PushName, peerPhone, normalizedChat, data.Info.IsGroup)
+	conversationTitle := resolveConversationTitle(effectivePushName, peerPhone, normalizedChat, data.Info.IsGroup)
 
 	record := MessageRecord{
 		RawPayload:        json.RawMessage(cleanRaw),
@@ -240,7 +248,7 @@ func extractRecord(raw []byte) (MessageRecord, error) {
 		JID:         normalizedChat,
 		PhoneNumber: peerPhone,
 		DisplayName: displayName,
-		PushName:    data.Info.PushName,
+		PushName:    effectivePushName,
 		IsGroup:     data.Info.IsGroup,
 		RawData:     json.RawMessage(`{}`),
 	}
