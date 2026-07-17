@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -34,6 +35,9 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	record, err := extractRecord(body)
 	if err != nil {
 		if errors.Is(err, ErrIgnoredEvent) {
+			if h.Logger != nil && strings.Contains(strings.ToLower(string(body)), "label") {
+				h.Logger.Printf("DEBUG LABEL PAYLOAD: %s", string(body))
+			}
 			w.WriteHeader(http.StatusOK)
 			return
 		}
